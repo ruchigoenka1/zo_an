@@ -9,7 +9,8 @@ st.title("Workshop Engagement & Clustering Data Prep")
 
 default_exclude_list = [
     "ashutosh.goenka123@gmail.com",
-    "admin@yourdomain.com"
+    "bewithruchi@gamil.com",
+    "ruchigoenka1@gamil.com"
 ]
 default_exclude_str = "\n".join(default_exclude_list)
 
