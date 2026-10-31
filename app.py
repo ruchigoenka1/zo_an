@@ -1,35 +1,40 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+import re
 
 st.set_page_config(page_title="Business Clarity Workshop - Attendance Matrix", layout="wide")
 
 st.title("Workshop Engagement & Clustering Data Prep")
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     uploaded_files = st.file_uploader("Upload Zoom Data", type=['csv', 'xlsx'], accept_multiple_files=True)
 with col2:
-    official_start_time = st.time_input("Official Start Time (Applies to all files)", value=pd.to_datetime("10:30").time())
+    official_start_time = st.time_input("Official Start Time (Applies to all)", value=pd.to_datetime("10:30").time())
+with col3:
+    exclude_emails_input = st.text_area("Emails to Exclude (comma or line separated)", placeholder="host@example.com\nadmin@example.com")
 
 def align_headers(df):
-    """Scans the first 15 rows to find the actual Zoom headers if metadata is at the top."""
-    # Check if current columns already look correct
     cols_str = df.columns.astype(str).str.lower()
     if any('join' in c for c in cols_str) and any('time' in c for c in cols_str):
         return df
     
-    # If not, scan the first few rows for the 'Join Time' string
     for i, row in df.head(15).iterrows():
         row_str = row.astype(str).str.lower()
         if any('join' in val and 'time' in val for val in row_str):
-            df.columns = row.tolist() # Set the found row as headers
-            return df.iloc[i+1:].reset_index(drop=True) # Return data below the header
+            df.columns = row.tolist()
+            return df.iloc[i+1:].reset_index(drop=True)
             
     return df
 
 if uploaded_files:
     try:
+        # Parse excluded emails into a clean list
+        exclude_list = []
+        if exclude_emails_input:
+            exclude_list = [e.strip().lower() for e in re.split(r'[,\n]+', exclude_emails_input) if e.strip()]
+
         all_data = []
         
         for uploaded_file in uploaded_files:
@@ -40,19 +45,14 @@ if uploaded_files:
             else:
                 continue
             
-            # 1. Dynamically find the real headers
             df = align_headers(df)
-            
-            # 2. Standardize column names
             df.columns = df.columns.astype(str).str.strip().str.lower()
             
-            # 3. Identify standard columns safely
             name_col = next((col for col in df.columns if 'name' in col), None)
             email_col = next((col for col in df.columns if 'email' in col), None)
             join_col = next((col for col in df.columns if 'join' in col and 'time' in col), None)
             leave_col = next((col for col in df.columns if 'leave' in col and 'time' in col), None)
             
-            # Fallbacks
             if not join_col: join_col = next((col for col in df.columns if 'join' in col), None)
             if not leave_col: leave_col = next((col for col in df.columns if 'leave' in col), None)
             
@@ -60,19 +60,19 @@ if uploaded_files:
                 st.warning(f"File '{uploaded_file.name}' is missing standard Zoom columns. Skipping.")
                 continue
             
-            # 4. Parse datetimes (removed 'mixed' format as Excel often handles this natively)
+            # Apply exclusion filter before processing
+            if email_col and exclude_list:
+                df[email_col] = df[email_col].astype(str)
+                df = df[~df[email_col].str.lower().str.strip().isin(exclude_list)]
+            
             df[join_col] = pd.to_datetime(df[join_col], errors='coerce')
             df[leave_col] = pd.to_datetime(df[leave_col], errors='coerce')
-            
-            # Drop empty/summary rows
             df = df.dropna(subset=[join_col, leave_col])
             
             if df.empty:
                 continue
                 
-            # Calculate metrics
             df['Session Duration Mins'] = (df[leave_col] - df[join_col]).dt.total_seconds() / 60
-            
             group_cols = [name_col, email_col] if email_col else [name_col]
             
             summary = df.groupby(group_cols).agg(
@@ -81,7 +81,6 @@ if uploaded_files:
                 actual_duration_mins=('Session Duration Mins', 'sum')
             ).reset_index()
             
-            # Restore display names
             summary.rename(columns={name_col: 'User Name'}, inplace=True)
             if email_col:
                 summary.rename(columns={email_col: 'User Email'}, inplace=True)
@@ -126,7 +125,7 @@ if uploaded_files:
                 mime="text/csv",
             )
         else:
-            st.warning("No valid datetime data found. Please ensure files contain actual participant join/leave times.")
+            st.warning("No valid data found after applying exclusions.")
             
     except Exception as e:
         st.error(f"Error processing files. Details: {e}")
