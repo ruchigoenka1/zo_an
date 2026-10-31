@@ -8,9 +8,12 @@ st.set_page_config(page_title="Business Clarity Workshop - Attendance Matrix", l
 
 st.title("Workshop Engagement & Clustering Data Prep")
 
+# Added the new emails to the default exclude list
 default_exclude_list = [
     "ashutosh.goenka123@gmail.com",
-    "admin@yourdomain.com"
+    "admin@yourdomain.com",
+    "bewithruchi@gmail.com",
+    "ruchigoenka1@gmail.com"
 ]
 default_exclude_str = "\n".join(default_exclude_list)
 
@@ -56,6 +59,31 @@ def calc_max_simultaneous(group_df):
             
     return max_logins
 
+def calc_actual_duration_merged(group_df):
+    """
+    Merges overlapping time intervals to calculate the true active duration 
+    without double-counting time if a user is logged in on multiple devices.
+    """
+    intervals = group_df[['Join Time', 'Leave Time']].dropna().values.tolist()
+    if not intervals:
+        return 0
+        
+    # Sort intervals by join time
+    intervals.sort(key=lambda x: x[0])
+    
+    merged = [intervals[0]]
+    for current in intervals[1:]:
+        last = merged[-1]
+        # If the current interval overlaps with the last one, merge them
+        if current[0] <= last[1]:
+            merged[-1] = (last[0], max(last[1], current[1]))
+        else:
+            merged.append(current)
+            
+    # Calculate the total seconds across all non-overlapping merged intervals
+    total_seconds = sum((iv[1] - iv[0]).total_seconds() for iv in merged)
+    return total_seconds / 60.0
+
 if uploaded_files:
     try:
         exclude_list = []
@@ -63,7 +91,7 @@ if uploaded_files:
             exclude_list = [e.strip().lower() for e in re.split(r'[,\n]+', exclude_emails_input) if e.strip()]
 
         all_data = []
-        all_raw_data = [] # Stores standardized raw row data for the Presence Filter
+        all_raw_data = [] 
         
         for uploaded_file in uploaded_files:
             if uploaded_file.name.endswith('.csv'):
@@ -88,7 +116,6 @@ if uploaded_files:
                 st.warning(f"File '{uploaded_file.name}' is missing standard Zoom columns. Skipping.")
                 continue
                 
-            # Standardize names for processing
             df['User Name'] = df[name_col].astype(str).str.strip().str.title()
             if email_col:
                 df['User Email'] = df[email_col].astype(str).str.strip().str.lower()
@@ -108,17 +135,21 @@ if uploaded_files:
             df['Workshop Date'] = df['Join Time'].dt.date
             df['Session Duration Mins'] = (df['Leave Time'] - df['Join Time']).dt.total_seconds() / 60
             
-            # Save cleaned raw data for presence matrix
             all_raw_data.append(df[['User Name', 'User Email', 'Workshop Date', 'Join Time', 'Leave Time', 'Session Duration Mins']])
             
             group_cols = ['User Name', 'User Email']
             
+            # Aggregate base limits
             summary = df.groupby(group_cols).agg(
                 first_join=('Join Time', 'min'),
-                last_leave=('Leave Time', 'max'),
-                actual_duration_mins=('Session Duration Mins', 'sum')
+                last_leave=('Leave Time', 'max')
             ).reset_index()
             
+            # Merge overlapping intervals for True Actual Duration
+            actual_dur_df = df.groupby(group_cols).apply(calc_actual_duration_merged).reset_index(name='actual_duration_mins')
+            summary = pd.merge(summary, actual_dur_df, on=group_cols)
+            
+            # Calculate peak device concurrency
             concurrency_df = df.groupby(group_cols).apply(calc_max_simultaneous).reset_index(name='max_simultaneous_logins')
             summary = pd.merge(summary, concurrency_df, on=group_cols)
             
@@ -132,8 +163,10 @@ if uploaded_files:
             time_str = official_start_time.strftime("%H:%M:%S")
             summary['official_start_dt'] = pd.to_datetime(date_str + " " + time_str)
             
-            # 2. Total span from official start time
-            summary['span_from_official_start_mins'] = (summary['last_leave'] - summary['official_start_dt']).dt.total_seconds() / 60
+            # 2. Total span dynamically anchored for late vs early joiners
+            # Takes the latest of either the Official Start Time or their First Join Time
+            summary['effective_start'] = summary[['first_join', 'official_start_dt']].max(axis=1)
+            summary['span_from_official_start_mins'] = (summary['last_leave'] - summary['effective_start']).dt.total_seconds() / 60
             summary['span_from_official_start_mins'] = summary['span_from_official_start_mins'].clip(lower=0).round(2)
             
             summary['minutes_late'] = (summary['first_join'] - summary['official_start_dt']).dt.total_seconds() / 60
@@ -145,7 +178,9 @@ if uploaded_files:
                 else: return "Late"
                 
             summary['arrival_category'] = summary['minutes_late'].apply(categorize_arrival)
-            summary = summary.drop(columns=['official_start_dt'])
+            
+            # Cleanup temp columns
+            summary = summary.drop(columns=['official_start_dt', 'effective_start'])
             all_data.append(summary)
             
         if all_data:
@@ -170,8 +205,8 @@ if uploaded_files:
             
             # ----------------- SECTION 2: HISTOGRAM -----------------
             st.divider()
-            st.subheader("Distribution of Active Time Spent")
-            st.markdown("Shows how long participants actively remained in the session (excluding breaks).")
+            st.subheader("Distribution of True Active Time Spent")
+            st.markdown("Shows how long participants actively remained in the session (excluding overlapping devices and breaks).")
             
             fig, ax = plt.subplots(figsize=(10, 4))
             ax.hist(final_matrix['actual_duration_mins'], bins=20, color='#4CAF50', edgecolor='black')
@@ -202,13 +237,11 @@ if uploaded_files:
                 t_start = pd.to_datetime(f"{date_str} {filter_start.strftime('%H:%M:%S')}")
                 t_end = pd.to_datetime(f"{date_str} {filter_end.strftime('%H:%M:%S')}")
                 
-                # Check if their session overlaps with the requested time window
                 return (row['Join Time'] <= t_end) and (row['Leave Time'] >= t_start)
                 
             present_mask = master_raw_df.apply(check_presence, axis=1)
             present_users_df = master_raw_df[present_mask]
             
-            # Remove duplicate names if they rapidly disconnected and reconnected within the same minute
             present_summary = present_users_df[['User Name', 'User Email', 'Workshop Date']].drop_duplicates().reset_index(drop=True)
             
             st.write(f"**Found {len(present_summary)} participants present during this time window.**")
