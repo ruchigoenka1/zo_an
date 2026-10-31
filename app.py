@@ -31,7 +31,7 @@ def align_headers(df):
 if uploaded_files:
     try:
         # Parse excluded emails into a clean list
-        exclude_list = []
+        exclude_list = ["bewithruchi@gmail.com", "ashutosh.goenka123@gmail.com", "ruchigoenka1@gmail.com"]
         if exclude_emails_input:
             exclude_list = [e.strip().lower() for e in re.split(r'[,\n]+', exclude_emails_input) if e.strip()]
 
