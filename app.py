@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import re
+import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Business Clarity Workshop - Attendance Matrix", layout="wide")
 
@@ -9,8 +10,7 @@ st.title("Workshop Engagement & Clustering Data Prep")
 
 default_exclude_list = [
     "ashutosh.goenka123@gmail.com",
-    "bewithruchi@gmail.com",
-    "ruchigoenka1@gmail.com"
+    "admin@yourdomain.com"
 ]
 default_exclude_str = "\n".join(default_exclude_list)
 
@@ -39,12 +39,11 @@ def align_headers(df):
             
     return df
 
-def calc_max_simultaneous(group_df, join_col, leave_col):
-    """Calculates peak concurrent overlapping sessions for a single user."""
+def calc_max_simultaneous(group_df):
     events = []
     for _, row in group_df.iterrows():
-        events.append((row[join_col], 1))
-        events.append((row[leave_col], -1))
+        events.append((row['Join Time'], 1))
+        events.append((row['Leave Time'], -1))
         
     events.sort(key=lambda x: (x[0], x[1]))
     
@@ -64,10 +63,10 @@ if uploaded_files:
             exclude_list = [e.strip().lower() for e in re.split(r'[,\n]+', exclude_emails_input) if e.strip()]
 
         all_data = []
+        all_raw_data = [] # Stores standardized raw row data for the Presence Filter
         
         for uploaded_file in uploaded_files:
             if uploaded_file.name.endswith('.csv'):
-                # Added index_col=False to stop Pandas from shifting Zoom's trailing comma rows
                 df = pd.read_csv(uploaded_file, index_col=False) 
             elif uploaded_file.name.endswith('.xlsx'):
                 df = pd.read_excel(uploaded_file)
@@ -89,46 +88,53 @@ if uploaded_files:
                 st.warning(f"File '{uploaded_file.name}' is missing standard Zoom columns. Skipping.")
                 continue
                 
-            df[name_col] = df[name_col].astype(str).str.strip().str.title()
+            # Standardize names for processing
+            df['User Name'] = df[name_col].astype(str).str.strip().str.title()
             if email_col:
-                df[email_col] = df[email_col].astype(str).str.strip().str.lower()
-            
+                df['User Email'] = df[email_col].astype(str).str.strip().str.lower()
+            else:
+                df['User Email'] = "No Email"
+                
             if email_col and exclude_list:
-                df = df[~df[email_col].isin(exclude_list)]
+                df = df[~df['User Email'].isin(exclude_list)]
             
-            df[join_col] = pd.to_datetime(df[join_col], errors='coerce')
-            df[leave_col] = pd.to_datetime(df[leave_col], errors='coerce')
-            df = df.dropna(subset=[join_col, leave_col])
+            df['Join Time'] = pd.to_datetime(df[join_col], errors='coerce')
+            df['Leave Time'] = pd.to_datetime(df[leave_col], errors='coerce')
+            df = df.dropna(subset=['Join Time', 'Leave Time'])
             
             if df.empty:
                 continue
                 
-            df['Session Duration Mins'] = (df[leave_col] - df[join_col]).dt.total_seconds() / 60
-            group_cols = [name_col, email_col] if email_col else [name_col]
+            df['Workshop Date'] = df['Join Time'].dt.date
+            df['Session Duration Mins'] = (df['Leave Time'] - df['Join Time']).dt.total_seconds() / 60
+            
+            # Save cleaned raw data for presence matrix
+            all_raw_data.append(df[['User Name', 'User Email', 'Workshop Date', 'Join Time', 'Leave Time', 'Session Duration Mins']])
+            
+            group_cols = ['User Name', 'User Email']
             
             summary = df.groupby(group_cols).agg(
-                first_join=(join_col, 'min'),
-                last_leave=(leave_col, 'max'),
+                first_join=('Join Time', 'min'),
+                last_leave=('Leave Time', 'max'),
                 actual_duration_mins=('Session Duration Mins', 'sum')
             ).reset_index()
             
-            concurrency_df = df.groupby(group_cols).apply(
-                lambda g: calc_max_simultaneous(g, join_col, leave_col)
-            ).reset_index(name='max_simultaneous_logins')
-            
+            concurrency_df = df.groupby(group_cols).apply(calc_max_simultaneous).reset_index(name='max_simultaneous_logins')
             summary = pd.merge(summary, concurrency_df, on=group_cols)
             
-            summary.rename(columns={name_col: 'User Name'}, inplace=True)
-            if email_col:
-                summary.rename(columns={email_col: 'User Email'}, inplace=True)
-            
             summary['Workshop Date'] = summary['first_join'].dt.date
+            
+            # 1. Total span from first join
             summary['total_span_mins'] = (summary['last_leave'] - summary['first_join']).dt.total_seconds() / 60
             summary['time_away_mins'] = (summary['total_span_mins'] - summary['actual_duration_mins']).round(2).clip(lower=0)
             
             date_str = summary['Workshop Date'].astype(str)
             time_str = official_start_time.strftime("%H:%M:%S")
             summary['official_start_dt'] = pd.to_datetime(date_str + " " + time_str)
+            
+            # 2. Total span from official start time
+            summary['span_from_official_start_mins'] = (summary['last_leave'] - summary['official_start_dt']).dt.total_seconds() / 60
+            summary['span_from_official_start_mins'] = summary['span_from_official_start_mins'].clip(lower=0).round(2)
             
             summary['minutes_late'] = (summary['first_join'] - summary['official_start_dt']).dt.total_seconds() / 60
             summary['minutes_late'] = summary['minutes_late'].round(2)
@@ -147,10 +153,10 @@ if uploaded_files:
             
             cols = final_matrix.columns.tolist()
             if 'Workshop Date' in cols:
-                insert_idx = 2 if 'User Email' in cols else 1
-                cols.insert(insert_idx, cols.pop(cols.index('Workshop Date')))
+                cols.insert(2, cols.pop(cols.index('Workshop Date')))
                 final_matrix = final_matrix[cols]
             
+            # ----------------- SECTION 1: MAIN MATRIX -----------------
             st.subheader("Processed Participant Matrix")
             st.dataframe(final_matrix, use_container_width=True)
             
@@ -161,6 +167,53 @@ if uploaded_files:
                 file_name="master_workshop_clustering_matrix.csv",
                 mime="text/csv",
             )
+            
+            # ----------------- SECTION 2: HISTOGRAM -----------------
+            st.divider()
+            st.subheader("Distribution of Active Time Spent")
+            st.markdown("Shows how long participants actively remained in the session (excluding breaks).")
+            
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.hist(final_matrix['actual_duration_mins'], bins=20, color='#4CAF50', edgecolor='black')
+            ax.set_title("Histogram of Actual Duration")
+            ax.set_xlabel("Minutes Actively Spent in Workshop")
+            ax.set_ylabel("Number of Participants")
+            st.pyplot(fig)
+            
+            # ----------------- SECTION 3: PRESENCE FILTER -----------------
+            st.divider()
+            st.subheader("Presence Filter: Who was there?")
+            st.markdown("Find out which participants were actively logged in during a specific time window.")
+            
+            master_raw_df = pd.concat(all_raw_data, ignore_index=True)
+            
+            pc1, pc2, pc3 = st.columns(3)
+            with pc1:
+                filter_start = st.time_input("Target Start Time", value=pd.to_datetime("11:00").time())
+            with pc2:
+                use_end_time = st.checkbox("Check a Time Window (End Time)", value=False)
+                if use_end_time:
+                    filter_end = st.time_input("Target End Time", value=pd.to_datetime("11:30").time())
+                else:
+                    filter_end = filter_start
+            
+            def check_presence(row):
+                date_str = str(row['Workshop Date'])
+                t_start = pd.to_datetime(f"{date_str} {filter_start.strftime('%H:%M:%S')}")
+                t_end = pd.to_datetime(f"{date_str} {filter_end.strftime('%H:%M:%S')}")
+                
+                # Check if their session overlaps with the requested time window
+                return (row['Join Time'] <= t_end) and (row['Leave Time'] >= t_start)
+                
+            present_mask = master_raw_df.apply(check_presence, axis=1)
+            present_users_df = master_raw_df[present_mask]
+            
+            # Remove duplicate names if they rapidly disconnected and reconnected within the same minute
+            present_summary = present_users_df[['User Name', 'User Email', 'Workshop Date']].drop_duplicates().reset_index(drop=True)
+            
+            st.write(f"**Found {len(present_summary)} participants present during this time window.**")
+            st.dataframe(present_summary, use_container_width=True)
+            
         else:
             st.warning("No valid data found after applying exclusions.")
             
