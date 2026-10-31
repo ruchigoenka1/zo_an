@@ -7,13 +7,23 @@ st.set_page_config(page_title="Business Clarity Workshop - Attendance Matrix", l
 
 st.title("Workshop Engagement & Clustering Data Prep")
 
+default_exclude_list = [
+    "ashutosh.goenka123@gmail.com",
+    "admin@yourdomain.com"
+]
+default_exclude_str = "\n".join(default_exclude_list)
+
 col1, col2, col3 = st.columns(3)
 with col1:
     uploaded_files = st.file_uploader("Upload Zoom Data", type=['csv', 'xlsx'], accept_multiple_files=True)
 with col2:
     official_start_time = st.time_input("Official Start Time (Applies to all)", value=pd.to_datetime("10:30").time())
 with col3:
-    exclude_emails_input = st.text_area("Emails to Exclude (comma or line separated)", placeholder="host@example.com\nadmin@example.com")
+    exclude_emails_input = st.text_area(
+        "Emails to Exclude (comma or line separated)", 
+        value=default_exclude_str,
+        placeholder="host@example.com\nadmin@example.com"
+    )
 
 def align_headers(df):
     cols_str = df.columns.astype(str).str.lower()
@@ -28,10 +38,27 @@ def align_headers(df):
             
     return df
 
+def calc_max_simultaneous(group_df, join_col, leave_col):
+    """Calculates peak concurrent overlapping sessions for a single user."""
+    events = []
+    for _, row in group_df.iterrows():
+        events.append((row[join_col], 1))
+        events.append((row[leave_col], -1))
+        
+    events.sort(key=lambda x: (x[0], x[1]))
+    
+    current_logins = 0
+    max_logins = 0
+    for time, event_type in events:
+        current_logins += event_type
+        if current_logins > max_logins:
+            max_logins = current_logins
+            
+    return max_logins
+
 if uploaded_files:
     try:
-        # Parse excluded emails into a clean list
-        exclude_list = ["bewithruchi@gmail.com", "ashutosh.goenka123@gmail.com", "ruchigoenka1@gmail.com"]
+        exclude_list = []
         if exclude_emails_input:
             exclude_list = [e.strip().lower() for e in re.split(r'[,\n]+', exclude_emails_input) if e.strip()]
 
@@ -59,11 +86,14 @@ if uploaded_files:
             if not all([name_col, join_col, leave_col]):
                 st.warning(f"File '{uploaded_file.name}' is missing standard Zoom columns. Skipping.")
                 continue
+                
+            # Standardize names and emails to prevent duplicate rows from typos or trailing spaces
+            df[name_col] = df[name_col].astype(str).str.strip().str.title()
+            if email_col:
+                df[email_col] = df[email_col].astype(str).str.strip().str.lower()
             
-            # Apply exclusion filter before processing
             if email_col and exclude_list:
-                df[email_col] = df[email_col].astype(str)
-                df = df[~df[email_col].str.lower().str.strip().isin(exclude_list)]
+                df = df[~df[email_col].isin(exclude_list)]
             
             df[join_col] = pd.to_datetime(df[join_col], errors='coerce')
             df[leave_col] = pd.to_datetime(df[leave_col], errors='coerce')
@@ -80,6 +110,12 @@ if uploaded_files:
                 last_leave=(leave_col, 'max'),
                 actual_duration_mins=('Session Duration Mins', 'sum')
             ).reset_index()
+            
+            concurrency_df = df.groupby(group_cols).apply(
+                lambda g: calc_max_simultaneous(g, join_col, leave_col)
+            ).reset_index(name='max_simultaneous_logins')
+            
+            summary = pd.merge(summary, concurrency_df, on=group_cols)
             
             summary.rename(columns={name_col: 'User Name'}, inplace=True)
             if email_col:
