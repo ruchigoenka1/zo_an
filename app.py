@@ -9,8 +9,7 @@ st.title("Workshop Engagement & Clustering Data Prep")
 
 default_exclude_list = [
     "ashutosh.goenka123@gmail.com",
-    "bewithruchi@gmail.com",
-    "ruchigoenka1@gmail.com"
+    "admin@yourdomain.com"
 ]
 default_exclude_str = "\n".join(default_exclude_list)
 
@@ -67,7 +66,8 @@ if uploaded_files:
         
         for uploaded_file in uploaded_files:
             if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
+                # Added index_col=False to stop Pandas from shifting Zoom's trailing comma rows
+                df = pd.read_csv(uploaded_file, index_col=False) 
             elif uploaded_file.name.endswith('.xlsx'):
                 df = pd.read_excel(uploaded_file)
             else:
@@ -88,7 +88,6 @@ if uploaded_files:
                 st.warning(f"File '{uploaded_file.name}' is missing standard Zoom columns. Skipping.")
                 continue
                 
-            # Standardize names and emails to prevent duplicate rows from typos or trailing spaces
             df[name_col] = df[name_col].astype(str).str.strip().str.title()
             if email_col:
                 df[email_col] = df[email_col].astype(str).str.strip().str.lower()
